@@ -1,0 +1,1689 @@
+repeat task.wait() until game:IsLoaded()
+if identifyexecutor() == "AWP" or identifyexecutor() == "Nihon" then cleardrawcache() end
+
+local uis = game:GetService("UserInputService")
+local players = game:GetService("Players")
+local ws = game:GetService("Workspace")
+local rs = game:GetService("ReplicatedStorage")
+local http = game:GetService("HttpService")
+local run = game:GetService("RunService")
+local tween_s = game:GetService("TweenService")
+local coregui = game:GetService("CoreGui")
+local cas = game:GetService("ContextActionService")
+local teleport_s = game:GetService("TeleportService")
+local sound_s = game:GetService("SoundService")
+local lighting = game:GetService("Lighting")
+local mat_s = game:GetService("MaterialService")
+local gui_s = game:GetService("GuiService")
+
+local camera = ws.CurrentCamera
+local lp = players.LocalPlayer
+local mouse = lp:GetMouse()
+local event = rs:WaitForChild("MainEvent", 10) or rs:FindFirstChild("MainEvent")
+local ignored = ws:WaitForChild("Ignored", 10) or ws:FindFirstChild("Ignored")
+local hui = (gethui and gethui()) or coregui
+
+local v3 = Vector3.new
+local v2 = Vector2.new
+local cfr = CFrame.new
+local cfa = CFrame.Angles
+local udim2 = UDim2.new
+local c3 = Color3.fromRGB
+local rad = math.rad
+local clamp = math.clamp
+local floor = math.floor
+local abs = math.abs
+local pi = math.pi
+local sin = math.sin
+local cos = math.cos
+local random = math.random
+local clock = os.clock
+
+local library = loadstring(game:HttpGet("https://raw.githubusercontent.com/luaprostudio/insomnia/refs/heads/main/luas"))()
+local flags = library.flags
+if library.gui then library.gui.Parent = hui end
+
+local connections = {}
+local heartbeat_funcs = {}
+local anti_aim = {}
+local player_data = {}
+local local_parts = {}
+local local_guns = {}
+local shops = {}
+local backtrack_data = {}
+local ragebot_targets = {}
+local esp_cache = {}
+
+local local_character = lp.Character
+local local_tool = nil
+local local_gun = 350
+local local_cash = 0
+local local_ping = 50
+local local_fps = 200
+local local_armor = 0
+local local_knocked = false
+local local_reloading = false
+local local_following = false
+local local_server_position = cfr()
+local local_client_position = cfr()
+local purchasing = nil
+local vehicle = nil
+local in_void = false
+local stomping = false
+
+local ragebot_target = nil
+local ragebot_aim_position = nil
+local ragebot_force_position = nil
+local custom_ragebot_aim_position = nil
+local target_velocity = v3()
+local target_last_position = nil
+local last_fire = clock()
+local last_refresh = clock()
+local shot_count = 0
+local local_bought_count = 0
+local old_equipped = {}
+local is_defensive = false
+
+local function create_connection(sig, cb)
+    local conn = sig:Connect(cb)
+    table.insert(connections, conn)
+    return conn
+end
+
+local function remove_from_tbl(tbl, idx)
+    local len = #tbl
+    for i = idx, len - 1 do tbl[i] = tbl[i + 1] end
+    tbl[len] = nil
+end
+
+local function round_num(num, dec)
+    local mult = 10^(dec or 0)
+    return floor(num * mult + 0.5) / mult
+end
+
+local function get_mouse_pos()
+    return uis:GetMouseLocation()
+end
+
+local function w2v(pos)
+    return camera:WorldToViewportPoint(pos)
+end
+
+local function notify(text, ntype)
+    library:notification({text = text, time = 3})
+end
+
+local signals = {
+    on_player_added = {},
+    on_player_died = {},
+    on_player_knocked = {},
+    on_player_character_added = {},
+    on_player_health_changed = {},
+    on_player_armor_changed = {},
+    on_player_tool_equipped = {},
+    on_local_character_added = {},
+    on_local_character_loaded = {},
+    on_local_health_changed = {},
+    on_local_armor_changed = {},
+    on_local_knocked = {},
+    on_local_reload = {},
+    on_local_tool_equipped = {},
+    on_local_bullet_confirmed = {},
+    on_local_bullet_failed = {},
+    on_ragebot_target_changed = {},
+    on_shot_at = {},
+    on_stomp = {},
+    on_local_ammo_changed = {},
+}
+
+local function fire_signal(name, ...)
+    local sig = signals[name]
+    if sig then for _, cb in sig do task.spawn(cb, ...) end end
+end
+
+local function connect_signal(name, cb)
+    if not signals[name] then signals[name] = {} end
+    table.insert(signals[name], cb)
+end
+
+local function get_target_hitbox(target_data, preferred)
+    if not target_data or not target_data[4] then return nil end
+    local parts = target_data[4]
+    local pref = type(preferred) == "table" and preferred[1] or preferred or "head"
+    pref = tostring(pref):lower()
+    if pref == "head" then
+        return parts.Head or parts.HumanoidRootPart
+    elseif pref == "root" or pref == "humanoidrootpart" then
+        return parts.HumanoidRootPart or parts.UpperTorso or parts.Torso or parts.Head
+    else
+        return parts.UpperTorso or parts.Torso or parts.HumanoidRootPart or parts.Head
+    end
+end
+
+local function apply_hrp_fix(hrp)
+    local old = getrawmetatable(hrp)
+    local old_index = old.__index
+    local new_mt = {}
+    new_mt.__index = newcclosure(function(self, idx)
+        if not checkcaller() and self and idx == "CFrame" and (#anti_aim ~= 0 or purchasing) and not vehicle then
+            return local_client_position
+        end
+        return old_index(self, idx)
+    end)
+    for k, v in old do if not new_mt[k] then new_mt[k] = v end end
+    setrawmetatable(hrp, new_mt)
+end
+
+local function hook_humanoid(humanoid)
+    local old = getrawmetatable(humanoid)
+    local old_index = old.__index
+    local old_newindex = old.__newindex
+    local cached = {WalkSpeed = humanoid.WalkSpeed, JumpPower = humanoid.JumpPower}
+    local new_mt = {}
+    new_mt.__index = newcclosure(function(self, idx)
+        if not checkcaller() and self and (idx == "WalkSpeed" or idx == "JumpPower") then
+            return cached[idx]
+        end
+        return old_index(self, idx)
+    end)
+    new_mt.__newindex = newcclosure(function(self, idx, val)
+        if not checkcaller() and self then
+            if idx == "WalkSpeed" and flags.remove_slowdowns and val < 16 then
+                cached[idx] = val
+                if flags.remove_slowdowns then return end
+            elseif idx == "JumpPower" then
+                if flags.remove_jump_cooldown and val == 0 then cached[idx] = 0 return end
+                if flags.jump_power and flags.jump_power_value then val = flags.jump_power_value end
+            end
+        end
+        return old_newindex(self, idx, val)
+    end)
+    for k, v in old do if not new_mt[k] then new_mt[k] = v end end
+    setrawmetatable(humanoid, new_mt)
+end
+
+local function on_local_child_added(child)
+    local_parts[child.Name] = child
+    if child.ClassName == "Tool" then
+        local handle = child:FindFirstChild("Handle")
+        if handle then
+            local_tool = child
+            fire_signal("on_local_tool_equipped", child)
+            local range = child:FindFirstChild("Range")
+            local ammo = child:FindFirstChild("Ammo")
+            local max_range = (range and range.Value) or 350
+            local current_ammo = (ammo and ammo.Value) or 999
+            local_gun = max_range
+            local new_gun = {handle, max_range, current_ammo}
+            if ammo then
+                new_gun[4] = create_connection(ammo:GetPropertyChangedSignal("Value"), function()
+                    local a = ammo.Value
+                    new_gun[3] = a
+                    fire_signal("on_local_ammo_changed", local_guns[handle], a)
+                end)
+            end
+            local_guns[handle] = new_gun
+        end
+    end
+end
+
+local function on_local_child_removed(child)
+    local_parts[child.Name] = nil
+    if child.ClassName == "Tool" then
+        fire_signal("on_local_tool_equipped", false, child)
+        local handle = child:FindFirstChild("Handle")
+        if handle then
+            local old = local_guns[handle]
+            if old then
+                if old[4] then old[4]:Disconnect() end
+                local_guns[handle] = nil
+            end
+        end
+        local found = nil
+        for k, v in pairs(local_guns) do found = k break end
+        local_gun = found and local_gun or 350
+        local_tool = found and found.Parent or nil
+    end
+end
+
+local function on_local_character_added(character)
+    vehicle = nil
+    local_gun = 350
+    local_tool = nil
+    local_guns = {}
+    local hrp = character:WaitForChild("HumanoidRootPart", 5)
+    if hrp then apply_hrp_fix(hrp) end
+    local_parts = {HumanoidRootPart = hrp}
+    local humanoid = character:WaitForChild("Humanoid", 5)
+    if humanoid then
+        create_connection(humanoid:GetPropertyChangedSignal("Health"), function()
+            fire_signal("on_local_health_changed", humanoid.Health)
+        end)
+        hook_humanoid(humanoid)
+    end
+    character:WaitForChild("Head", 5)
+    for _, child in pairs(character:GetChildren()) do
+        local_parts[child.Name] = child
+        if child.ClassName == "Tool" then on_local_child_added(child) end
+    end
+    create_connection(character.ChildAdded, on_local_child_added)
+    create_connection(character.ChildRemoved, on_local_child_removed)
+    local_character = character
+    fire_signal("on_local_character_added", 1)
+    local full = character:WaitForChild("FULLY_LOADED_CHAR", 9e9)
+    if not full then return end
+    local body_fx = character:WaitForChild("BodyEffects", 9e9)
+    local ko = body_fx:WaitForChild("K.O", 9e9)
+    local reload = body_fx:WaitForChild("Reload", 9e9)
+    local armor = body_fx:WaitForChild("Armor", 9e9)
+    create_connection(armor:GetPropertyChangedSignal("Value"), function()
+        local_armor = armor.Value
+        fire_signal("on_local_armor_changed", local_armor)
+    end)
+    create_connection(ko:GetPropertyChangedSignal("Value"), function()
+        fire_signal("on_local_knocked", ko.Value)
+        local_knocked = ko.Value
+    end)
+    create_connection(reload:GetPropertyChangedSignal("Value"), function()
+        fire_signal("on_local_reload", local_tool)
+        local_reloading = reload.Value
+    end)
+    local_reloading = false
+    local_armor = armor.Value
+    local_knocked = ko.Value
+    fire_signal("on_local_character_loaded", true)
+end
+
+if local_character then task.spawn(on_local_character_added, local_character) end
+create_connection(lp.CharacterAdded, on_local_character_added)
+
+local game_on_client_event = nil
+if event then
+    for _, v in getconnections(event.OnClientEvent) do
+        local func = v.Function
+        if func then
+            local info = getinfo(func)
+            if info then
+                for _, c in getconstants(func) do
+                    if tostring(c) == "ShootingRecoil" then
+                        game_on_client_event = func
+                        v:Disable()
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+local last_client_bullet_pos = v3()
+local last_client_bullet_shooter = nil
+
+if event then
+    create_connection(event.OnClientEvent, function(packet, ...)
+        if packet == "ShootingRecoil" then
+            shot_count += 1
+            if flags.remove_recoil then return end
+        elseif packet == "FLASHBANG" and flags.remove_flashbang then
+            return
+        elseif packet == "ClientBullet" then
+            local shooter, _, _, pos = ...
+            last_client_bullet_pos = pos
+            last_client_bullet_shooter = players:FindFirstChild(shooter.Name)
+        elseif packet == "ShotFrom" and last_client_bullet_shooter then
+            fire_signal("on_shot_at", last_client_bullet_shooter, last_client_bullet_pos)
+            last_client_bullet_shooter = nil
+            last_client_bullet_pos = nil
+        end
+        if game_on_client_event then
+            setthreadidentity(4)
+            return game_on_client_event(packet, ...)
+        end
+    end)
+end
+
+if event then
+    local old_mt = getrawmetatable(event)
+    local old_namecall = old_mt.__namecall
+    local old_idx = old_mt.__index
+    local fake_ev = {}
+    fake_ev.Connect = function(_, cb)
+        game_on_client_event = cb
+        return {Disconnect = function() end}
+    end
+    fake_ev.connect = fake_ev.Connect
+
+    local new_ev_mt = {}
+    new_ev_mt.__namecall = newcclosure(function(self, ...)
+        setthreadidentity(4)
+        if getnamecallmethod() == "FireServer" then
+            local args = {...}
+            local packet = args[1]
+            if packet == "ShootGun" then
+                if ragebot_aim_position and ragebot_target then
+                    local handle = args[2]
+                    local pos = ragebot_aim_position + v3(random(101,105)/100, 0.008, -0.008)
+                    local origin = local_server_position.p + v3(0.004, 3.0208, -0.048)
+                    local dir = (pos - origin).Unit
+                    local target_player = ragebot_target[2]
+                    local part = get_target_hitbox(ragebot_target, flags.ragebot_hitbox) or ragebot_target[4].Head
+                    task.spawn(function()
+                        setthreadidentity(8)
+                        local data = player_data[target_player]
+                        if not data then return end
+                        local old_count = shot_count
+                        local old_hp = data[9]
+                        local start = clock()
+                        repeat task.wait() until clock() - start > 0.25 + local_ping/1000 or shot_count > old_count
+                        if data and data[9] ~= old_hp then
+                            fire_signal("on_local_bullet_confirmed", target_player, part, tostring(floor(data[9] - old_hp)), shot_count)
+                        elseif shot_count == old_count then
+                            fire_signal("on_local_bullet_failed", target_player, part, "unknown", shot_count)
+                        end
+                    end)
+                    return old_namecall(self, "ShootGun", handle, origin, pos, part, dir)
+                end
+                local part = args[5]
+                if part and part.Parent then
+                    local plr = players:FindFirstChild(part.Parent.Name) or players:FindFirstChild(part.Parent.Parent and part.Parent.Parent.Name or "")
+                    if plr then
+                        task.spawn(function()
+                            setthreadidentity(8)
+                            local data = player_data[plr]
+                            if not data then return end
+                            local old_count = shot_count
+                            local old_hp = data[9]
+                            local start = clock()
+                            repeat task.wait() until clock() - start > 0.25 + local_ping/1000 or shot_count > old_count
+                            if data and data[9] ~= old_hp then
+                                fire_signal("on_local_bullet_confirmed", plr, part, tostring(floor(data[9] - old_hp)), shot_count)
+                            elseif shot_count == old_count then
+                                fire_signal("on_local_bullet_failed", plr, part, "unknown", shot_count)
+                            end
+                        end)
+                    end
+                end
+            elseif packet == "CHECKER_4" or packet == "CalculateShootClient" then
+                return
+            end
+        end
+        return old_namecall(self, ...)
+    end)
+    new_ev_mt.__index = newcclosure(function(s, i)
+        if i == "OnClientEvent" and not getfenv(0).closeTop25Button then return fake_ev end
+        return old_idx(s, i)
+    end)
+    for k, v in old_mt do if not new_ev_mt[k] then new_ev_mt[k] = v end end
+    setrawmetatable(event, new_ev_mt)
+end
+
+local function on_remote_character_added(character)
+    local humanoid = character:WaitForChild("Humanoid", 5)
+    local head = character:WaitForChild("Head", 5)
+    if not humanoid then return end
+    local plr = players:FindFirstChild(character.Name)
+    if not plr then return end
+    local data = player_data[plr]
+    if not data then return end
+    data[3] = character
+    local parts = data[4]
+    for p in pairs(parts) do parts[p] = nil end
+    for _, child in pairs(character:GetChildren()) do
+        parts[child.Name] = child
+        if child.ClassName == "Tool" then
+            data[13] = child
+            fire_signal("on_player_tool_equipped", data, child)
+        end
+    end
+    create_connection(character.ChildAdded, function(child)
+        parts[child.Name] = child
+        if child.ClassName == "Tool" then
+            data[13] = child
+            fire_signal("on_player_tool_equipped", data, child)
+        end
+    end)
+    create_connection(character.ChildRemoved, function(child)
+        parts[child.Name] = nil
+        if child.ClassName == "Tool" then
+            data[13] = nil
+            fire_signal("on_player_tool_equipped", data, nil)
+        end
+    end)
+    local old_hp = floor(humanoid.Health)
+    create_connection(humanoid:GetPropertyChangedSignal("Health"), function()
+        local hp = floor(humanoid.Health)
+        data[9] = hp
+        fire_signal("on_player_health_changed", data, hp, old_hp - hp)
+        old_hp = hp
+    end)
+    create_connection(humanoid:GetPropertyChangedSignal("MaxHealth"), function()
+        data[10] = floor(humanoid.MaxHealth)
+    end)
+    data[9] = old_hp
+    data[10] = floor(humanoid.MaxHealth)
+    data[11] = old_hp
+    fire_signal("on_player_character_added", data, character)
+    local body_fx = character:WaitForChild("BodyEffects", 9e9)
+    local sdeath = body_fx:WaitForChild("SDeath", 9e9)
+    local dead = body_fx:WaitForChild("Dead", 9e9)
+    local armor = body_fx:WaitForChild("Armor", 9e9)
+    local ko = body_fx:WaitForChild("K.O", 9e9)
+    local old_armor = armor.Value
+    local function do_death()
+        fire_signal("on_player_died", data)
+        fire_signal("on_player_health_changed", data, 0, old_hp)
+        fire_signal("on_player_tool_equipped", data, nil)
+        fire_signal("on_player_armor_changed", data, 0, old_armor)
+    end
+    if head then
+        create_connection(head:GetPropertyChangedSignal("Parent"), function()
+            if head.Parent == nil then data[7] = true do_death() end
+        end)
+    end
+    create_connection(dead:GetPropertyChangedSignal("Value"), do_death)
+    create_connection(sdeath:GetPropertyChangedSignal("Value"), function() data[7] = true end)
+    create_connection(ko:GetPropertyChangedSignal("Value"), function()
+        data[18] = ko.Value
+        fire_signal("on_player_knocked", data, ko.Value)
+    end)
+    create_connection(armor:GetPropertyChangedSignal("Value"), function()
+        local a = floor(armor.Value)
+        data[14] = a
+        fire_signal("on_player_armor_changed", data, a, old_armor - a)
+        old_armor = a
+    end)
+    data[7] = sdeath.Value
+    data[14] = old_armor
+    data[15] = old_armor
+    data[18] = ko.Value
+end
+
+local function register_player(plr)
+    local new_data = {
+        [1] = 1,
+        [2] = plr,
+        [3] = plr.Character,
+        [4] = {},
+        [5] = {},
+        [6] = false,
+        [7] = false,
+        [8] = nil,
+        [9] = 100,
+        [10] = 100,
+        [11] = 100,
+        [12] = {},
+        [13] = nil,
+        [14] = 0,
+        [15] = 0,
+        [16] = nil,
+        [17] = nil,
+        [18] = nil,
+        [19] = nil,
+    }
+    player_data[plr] = new_data
+    if plr.Character then task.spawn(on_remote_character_added, plr.Character) end
+    create_connection(plr.CharacterAdded, on_remote_character_added)
+    fire_signal("on_player_added", new_data)
+    task.spawn(function()
+        local df = plr:WaitForChild("DataFolder", 5)
+        if df then new_data[17] = df:WaitForChild("Information", 5) end
+    end)
+end
+
+local function remove_player(plr)
+    if plr == lp then return end
+    local data = player_data[plr]
+    if not data then return end
+    data[3] = nil
+    if ragebot_target == data then ragebot_target = nil ragebot_aim_position = nil end
+    player_data[plr] = nil
+    if esp_cache[plr] then
+        for _, obj in pairs(esp_cache[plr]) do
+            pcall(function() obj:Destroy() end)
+            pcall(function() obj.Visible = false end)
+        end
+        esp_cache[plr] = nil
+    end
+end
+
+for _, plr in pairs(players:GetPlayers()) do
+    if plr ~= lp then task.spawn(register_player, plr) end
+end
+create_connection(players.PlayerAdded, register_player)
+create_connection(players.PlayerRemoving, remove_player)
+
+local function set_ragebot_target(target, msg)
+    if ragebot_target == target then return end
+    ragebot_aim_position = nil
+    target_velocity = v3()
+    ragebot_target = target
+    target_last_position = nil
+    fire_signal("on_ragebot_target_changed", target)
+    if msg and flags.target_selection_notification then notify(msg, 1) end
+end
+
+local function is_target_valid(data)
+    if not data or data[7] or data[18] or not data[3] then return false end
+    local parts = data[4]
+    if not parts or not parts.HumanoidRootPart then return false end
+    local hrp_pos = parts.HumanoidRootPart.Position
+    if hrp_pos.Magnitude > 9e8 then return false end
+    local is_rifle = local_tool and (local_tool.Name == "[Rifle]" or local_tool.Name == "[Flintlock]")
+    if not is_rifle and (parts.FORCEFIELD or parts.ForceField or parts.GRABBING_CONSTRAINT) then return false end
+    return true
+end
+
+local function get_closest_to_mouse()
+    local mouse_pos = get_mouse_pos()
+    local closest = 9e9
+    local best = nil
+    for plr, data in pairs(player_data) do
+        if is_target_valid(data) then
+            local hrp_pos = data[4].HumanoidRootPart.Position
+            local pos, on_screen = w2v(hrp_pos)
+            if not on_screen and not flags.view_target then continue end
+            local dist_studs = (local_client_position.p - hrp_pos).Magnitude
+            if flags.target_selection_target_distance and flags.target_selection_target_distance ~= 250 and dist_studs > flags.target_selection_target_distance then continue end
+            local dist = (v2(pos.X, pos.Y) - mouse_pos).Magnitude
+            local fov = flags.ragebot_field_of_view
+            if fov and fov ~= 180 and not flags.view_target then
+                local max_dist = (camera.ViewportSize.Magnitude / (pi/2)) * (fov/180)
+                if dist > max_dist then continue end
+            end
+            if dist < closest then
+                closest = dist
+                best = data
+            end
+        end
+    end
+    return best
+end
+
+local function get_closest_to_char()
+    local closest = math.huge
+    local best = nil
+    for plr, data in pairs(player_data) do
+        if is_target_valid(data) then
+            local dist = (local_client_position.p - data[4].HumanoidRootPart.Position).Magnitude
+            if flags.target_selection_target_distance and flags.target_selection_target_distance ~= 250 and dist > flags.target_selection_target_distance then continue end
+            if dist < closest then closest = dist best = data end
+        end
+    end
+    return best
+end
+
+local function get_lowest_hp()
+    local lowest = math.huge
+    local best = nil
+    for plr, data in pairs(player_data) do
+        if is_target_valid(data) then
+            if data[9] < lowest then lowest = data[9] best = data end
+        end
+    end
+    return best
+end
+
+local function get_random_target()
+    local targets = {}
+    for plr, data in pairs(player_data) do
+        if is_target_valid(data) then
+            table.insert(targets, data)
+        end
+    end
+    if #targets > 0 then return targets[random(#targets)] end
+    return nil
+end
+
+local function get_ragebot_target_func()
+    local mode = type(flags.prioritize_by) == "table" and flags.prioritize_by[1] or flags.prioritize_by or "closest to mouse"
+    if mode == "closest to character" then return get_closest_to_char() end
+    if mode == "lowest health" then return get_lowest_hp() end
+    if mode == "random" then return get_random_target() end
+    return get_closest_to_mouse()
+end
+
+local function do_ragebot(dt, hrp)
+    if not flags.ragebot then
+        ragebot_aim_position = nil
+        return
+    end
+
+    local target = ragebot_target
+    local tick = clock()
+
+    if target then
+        if not is_target_valid(target) then
+            set_ragebot_target(nil, "target lost")
+            target = nil
+        elseif flags.target_selection_untarget_when and table.find(flags.target_selection_untarget_when, "better target") then
+            local best = get_ragebot_target_func()
+            if best and best ~= target then
+                set_ragebot_target(best, "switched to better target")
+                target = ragebot_target
+            end
+        end
+    end
+
+    if not target and (flags.target_selection_automatic or not flags.target_selection_target_bind) then
+        local best = get_ragebot_target_func()
+        if best then
+            set_ragebot_target(best, "target set to " .. best[2].Name)
+            target = ragebot_target
+        end
+    end
+
+    if not target or not target[4] then
+        ragebot_aim_position = nil
+        target_last_position = nil
+        target_velocity = v3()
+        return
+    end
+
+    local hitbox = get_target_hitbox(target, flags.ragebot_hitbox)
+    local torso = target[4].HumanoidRootPart or target[4].Torso or hitbox
+    if not hitbox or not torso then ragebot_aim_position = nil return end
+
+    if tick - last_refresh > (flags.resolver_rate or 0.037) then
+        local torso_pos = torso.Position
+        if target_last_position then
+            target_velocity = (torso_pos - target_last_position) / (tick - last_refresh)
+        end
+        target_last_position = torso_pos
+        last_refresh = tick
+    end
+
+    local hitbox_pos = hitbox.Position
+    ragebot_aim_position = hitbox_pos
+
+    if target_velocity then
+        local pred = flags.prediction or 0
+        if pred == 0 then pred = local_ping / 500 elseif pred == 2000 then pred = 0 else pred = pred / 1000 end
+        ragebot_aim_position = ragebot_aim_position + (target_velocity * pred)
+    end
+
+    if flags.auto_fire_at_backtrack then
+        local bt = backtrack_data[target[2]]
+        if bt and bt[2] then
+            local bt_hitbox = get_target_hitbox({[4]=bt[2]}, flags.ragebot_hitbox)
+            if bt_hitbox then ragebot_aim_position = bt_hitbox.Position end
+        end
+    end
+
+    is_defensive = false
+    if flags.auto_fire_defensive then
+        local def_pos = {}
+        local weight = hitbox_pos.Magnitude < 9e5 and (flags.void_spam_resolver_position_weight or 1.5) or (flags.void_spam_resolver_void_weight or 0.2)
+        if not def_pos[hitbox_pos] then def_pos[hitbox_pos] = {w = weight, t = tick} end
+        local highest = nil
+        local highest_w = 0
+        for pos, d in pairs(def_pos) do
+            if d.w > highest_w then highest_w = d.w highest = pos end
+        end
+        local acc = flags.void_spam_resolver_accuracy or 76.82
+        acc = 1 + (0.6525 * ((-50 + acc) / 50))
+        if highest and highest_w > acc then
+            ragebot_aim_position = highest
+            target_velocity = v3()
+            target_last_position = highest
+            is_defensive = true
+        end
+    end
+
+    ragebot_aim_position = ragebot_force_position or ragebot_aim_position
+    if custom_ragebot_aim_position then
+        ragebot_aim_position = custom_ragebot_aim_position
+        custom_ragebot_aim_position = nil
+    end
+
+    if local_gun and flags.auto_fire then
+        local cooldown = (flags.fire_cooldown or 5) / 1000
+        if tick - last_fire > cooldown then
+            if flags.auto_fire_always_fire or (local_server_position.p - ragebot_aim_position).Magnitude <= local_gun then
+                local new_guns = {}
+                for handle, gun_data in pairs(local_guns) do
+                    local parent = handle.Parent
+                    if parent and (parent.Name == "[Rifle]" or parent.Name == "[Flintlock]") then
+                        table.insert(new_guns, gun_data)
+                    end
+                end
+                for handle, gun_data in pairs(local_guns) do
+                    local parent = handle.Parent
+                    if parent and parent.Name ~= "[Rifle]" then table.insert(new_guns, gun_data) end
+                end
+                for i = 1, #new_guns do
+                    local gd = new_guns[i]
+                    local handle = gd[1]
+                    local ammo = gd[3]
+                    if ammo > 0 and handle.Parent then
+                        last_fire = clock()
+                        local delay_ms = flags.shot_delay or 0
+                        if delay_ms > 0 then task.wait(delay_ms / 1000) end
+                        local origin = local_server_position.p
+                        local pos = ragebot_aim_position
+                        local dir = (pos - origin)
+                        local mag = dir.Magnitude
+                        event:FireServer("ShootGun", handle, origin, pos, hitbox, (mag <= 0 or mag ~= mag) and (handle.Position - pos).Unit or dir.Unit)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function do_follow_target(dt, hrp)
+    if not flags.follow_target or not ragebot_target or not hrp or not ragebot_aim_position or ragebot_target[7] then
+        local_following = false
+        return
+    end
+    if flags.follow_target_stop_if then
+        if table.find(flags.follow_target_stop_if, "reloading") and local_reloading then local_following = false return end
+        if table.find(flags.follow_target_stop_if, "target knocked") and ragebot_target[18] then local_following = false return end
+        if table.find(flags.follow_target_stop_if, "no gun equipped") and not local_gun then local_following = false return end
+    end
+    local old_cframe = hrp.CFrame
+    local dist = flags.follow_target_distance or 15
+    local style = type(flags.follow_target_dropdown) == "table" and flags.follow_target_dropdown[1] or flags.follow_target_dropdown or "random"
+    local new_cf
+    if style == "random" or style == "random spam" then
+        new_cf = cfr(ragebot_aim_position + v3(random(-dist, dist), random(-dist, dist), random(-dist, dist)))
+        new_cf = new_cf * cfa(rad(random(1,359)), rad(random(1,359)), rad(random(1,359)))
+    elseif style == "strafe" then
+        local speed = flags.follow_target_speed or 75
+        local height = flags.follow_target_height or 0
+        new_cf = cfa(0, rad(360 * ((clock() * speed / 50) % 1)), 0) * cfr(0, 0, dist) + (ragebot_aim_position + v3(0, height, 0))
+    else
+        new_cf = cfr(ragebot_aim_position + v3(random(-dist, dist), random(-dist, dist), random(-dist, dist)))
+    end
+    local_following = true
+    hrp.CFrame = new_cf
+    run.RenderStepped:Wait()
+    hrp.CFrame = old_cframe
+end
+
+local function do_void_hide(dt, hrp)
+    if not flags.void_hide or not hrp then in_void = false return end
+    if flags.void_hide_disable_when then
+        if table.find(flags.void_hide_disable_when, "target selected") and ragebot_target then return end
+        if table.find(flags.void_hide_disable_when, "following target") and local_following then return end
+        if table.find(flags.void_hide_disable_when, "target knocked") and ragebot_target and ragebot_target[18] then return end
+        if table.find(flags.void_hide_disable_when, "purchasing") and purchasing then return end
+    end
+    local forced = false
+    if flags.void_hide_force_when then
+        if table.find(flags.void_hide_force_when, "reloading") and local_reloading then forced = true end
+        if table.find(flags.void_hide_force_when, "not full health") then
+            local hum = local_parts.Humanoid
+            if hum and hum.Health < hum.MaxHealth then forced = true end
+        end
+        if table.find(flags.void_hide_force_when, "tabbed out") and isrbxactive and not isrbxactive() then forced = true end
+    end
+    local old_cf = hrp.CFrame
+    local old_vel = hrp.Velocity
+    in_void = true
+    local vtype = type(flags.void_hide_type) == "table" and flags.void_hide_type[1] or flags.void_hide_type or "random"
+    local offset = flags.void_hide_offset or 0
+    if vtype == "random" or vtype == "vc server" then
+        if vtype == "vc server" then
+            hrp.CFrame = cfr(v3(0, random(-2147483647, 2147483647), 0)) + v3(random(-offset, offset), random(-offset, offset), random(-offset, offset))
+        else
+            hrp.CFrame = cfr(v3(random(-2147483647, 2147483647), random(-400, 2147483647), random(-2147483647, 2147483647))) + v3(random(-offset, offset), random(-offset, offset), random(-offset, offset))
+        end
+        hrp.CFrame = hrp.CFrame * cfa(rad(random(1,359)), rad(random(1,359)), rad(random(1,359)))
+    elseif vtype == "bait" then
+        local bait_dist = flags.void_hide_bait_distance or 250
+        hrp.CFrame = cfr(v3(random(-bait_dist, bait_dist), random(-200, 200), random(-bait_dist, bait_dist)))
+    end
+    run.RenderStepped:Wait()
+    hrp.CFrame = old_cf
+    hrp.Velocity = old_vel
+end
+
+local function do_velocity_desync(dt, hrp)
+    if not flags.velocity_desync or not hrp or stomping or purchasing then return end
+    if flags.velocity_desync_disable_when then
+        if table.find(flags.velocity_desync_disable_when, "auto stomping") and stomping then return end
+        if table.find(flags.velocity_desync_disable_when, "above x health") then
+            local hum = local_parts.Humanoid
+            local threshold = (flags.velocity_desync_health or 0) / 100
+            if hum and hum.Health / hum.MaxHealth >= threshold then return end
+        end
+    end
+    local old_lin = hrp.AssemblyLinearVelocity
+    local old_ang = hrp.AssemblyAngularVelocity
+    local vtype = type(flags.velocity_desync_type) == "table" and flags.velocity_desync_type[1] or flags.velocity_desync_type or "high"
+    local vel
+    if vtype == "high y" then vel = v3(0, 16384, 0)
+    elseif vtype == "limit" then vel = v3(random(-9223372036854775808, 9223372036854775807), random(-9223372036854775808, 9223372036854775807), random(-9223372036854775808, 9223372036854775807))
+    elseif vtype == "low" then vel = v3(random(1,2) == 1 and -300 or 300, random(1,2) == 1 and -300 or 300, random(1,2) == 1 and -300 or 300)
+    elseif vtype == "high" then vel = v3(random(1,2) == 1 and -16384 or 16384, random(1,2) == 1 and -14384 or 16384, random(1,2) == 1 and -16384 or 16384)
+    elseif vtype == "zero" then vel = v3()
+    else vel = v3() end
+    hrp.AssemblyLinearVelocity = vel
+    if flags.velocity_desync_rotate then hrp.AssemblyAngularVelocity = vel end
+    run.RenderStepped:Wait()
+    hrp.AssemblyLinearVelocity = old_lin
+    hrp.AssemblyAngularVelocity = old_ang
+end
+
+local function do_speed(dt, hrp)
+    if not flags.speed or not hrp then return end
+    local humanoid = local_parts.Humanoid
+    if not humanoid then return end
+    local move_dir = humanoid.MoveDirection
+    local mult = (flags.speed_value or 35) * 16
+    local style = type(flags.speed_style) == "table" and flags.speed_style[1] or flags.speed_style or "normal"
+    if style == "normal" then
+        hrp.CFrame = hrp.CFrame + (v3(move_dir.X, 0, move_dir.Z) * dt * mult)
+    elseif style == "bhop" then
+        hrp.CFrame = hrp.CFrame + (v3(move_dir.X, 0, move_dir.Z) * dt * mult)
+        if humanoid:GetState() == Enum.HumanoidStateType.Running then humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end
+    elseif style == "minecraft" then
+        hrp.CFrame = hrp.CFrame + (v3(move_dir.X, 0, move_dir.Z) * dt * mult)
+        if humanoid:GetState() == Enum.HumanoidStateType.Running then
+            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+            hrp.Velocity = hrp.Velocity * v3(1, 1.5, 1)
+            task.wait(humanoid.JumpPower / 500)
+            hrp.Velocity = hrp.Velocity * v3(1, -1.1, 1)
+        end
+    end
+end
+
+local function do_flight(dt, hrp)
+    if not flags.flight or not hrp then return end
+    local humanoid = local_parts.Humanoid
+    if not humanoid then return end
+    local move_dir = humanoid.MoveDirection
+    local mult = (flags.flight_value or 35) * 50
+    local y = 0
+    if uis:IsKeyDown(Enum.KeyCode.Space) then y = 1
+    elseif uis:IsKeyDown(Enum.KeyCode.S) then y = -camera.CFrame.lookVector.Y
+    elseif uis:IsKeyDown(Enum.KeyCode.W) then y = camera.CFrame.lookVector.Y end
+    hrp.Velocity = v3(0, pi - 2, 0)
+    hrp.CFrame = hrp.CFrame + (v3(move_dir.X, y * clamp(move_dir.Magnitude, 0, 1), move_dir.Z) * dt * mult)
+end
+
+local function do_noclip()
+    if not flags.noclip then return end
+    for _, part in pairs(local_parts) do
+        if part.ClassName == "MeshPart" or part.ClassName == "Part" then part.CanCollide = false end
+    end
+end
+
+local function scan_shops()
+    local shop_folder = ignored and (ignored:FindFirstChild("Shop") or ignored:WaitForChild("Shop", 5))
+    if not shop_folder then return end
+    for _, shop in pairs(shop_folder:GetChildren()) do
+        local item = shop.Name:lower()
+        local ammo, name, price = item:match("^(%d*)%s*%[(.-)%]%s*[%-%=]%s*%$(%d+)")
+        if price then price = tonumber(price) end
+        if name and price and price > 0 then
+            local head = shop:FindFirstChild("Head") or shop:FindFirstChildWhichIsA("BasePart")
+            local cd = shop:FindFirstChildOfClass("ClickDetector")
+            if head and cd then
+                shops[name] = {head.Position, price, cd, tonumber(ammo) or false, false, name, head}
+            end
+        end
+    end
+end
+task.spawn(scan_shops)
+
+local function buy_item(name, count)
+    name = name:lower()
+    local target_shop = nil
+    for sname, data in pairs(shops) do
+        if sname == name or sname:find(name, 1, true) or name:find(sname, 1, true) then
+            target_shop = data
+            break
+        end
+    end
+    if not target_shop then
+        scan_shops()
+        for sname, data in pairs(shops) do
+            if sname == name or sname:find(name, 1, true) or name:find(sname, 1, true) then
+                target_shop = data
+                break
+            end
+        end
+    end
+    if target_shop then
+        notify("purchasing " .. target_shop[6], 1)
+        local hrp = local_character and local_character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local old_cf = hrp.CFrame
+            purchasing = target_shop
+            local amt = count or 1
+            for _ = 1, amt do
+                hrp.CFrame = cfr(target_shop[1] - v3(0, 8.8, 0))
+                task.wait(0.04)
+                fireclickdetector(target_shop[3])
+                task.wait(0.04)
+            end
+            hrp.CFrame = old_cf
+            purchasing = nil
+        end
+    else
+        notify("item not found in shop: " .. name, 3)
+    end
+end
+
+local rage_fov_circle = Drawing.new("Circle")
+rage_fov_circle.Thickness = 1.5
+rage_fov_circle.Filled = false
+rage_fov_circle.Visible = false
+
+local target_tracer = Drawing.new("Line")
+target_tracer.Thickness = 2
+target_tracer.Visible = false
+
+local crosshair_lines = {}
+for i = 1, 4 do
+    local l = Drawing.new("Line")
+    l.Thickness = 1.5
+    l.Color = c3(255, 255, 255)
+    l.Visible = false
+    table.insert(crosshair_lines, l)
+end
+
+local circle_segments = 24
+local circle_lines = {}
+for i = 1, circle_segments do
+    local l = Drawing.new("Line")
+    l.Thickness = 1.5
+    l.Visible = false
+    table.insert(circle_lines, l)
+end
+
+local function draw_3d_circle(cf, radius, color)
+    local points = {}
+    for i = 1, circle_segments do
+        local angle = rad((i - 1) * (360 / circle_segments))
+        local world_pt = cf:PointToWorldSpace(v3(cos(angle) * radius, 0, sin(angle) * radius))
+        local scr_pt, on_screen = w2v(world_pt)
+        points[i] = {scr_pt, on_screen}
+    end
+    for i = 1, circle_segments do
+        local next_i = (i % circle_segments) + 1
+        local p1 = points[i]
+        local p2 = points[next_i]
+        local line = circle_lines[i]
+        if p1[2] and p2[2] then
+            line.From = v2(p1[1].X, p1[1].Y)
+            line.To = v2(p2[1].X, p2[1].Y)
+            line.Color = color
+            line.Visible = true
+        else
+            line.Visible = false
+        end
+    end
+end
+
+local function update_visualizations()
+    local mouse_pos = get_mouse_pos()
+    
+    if flags.ragebot and flags.ragebot_field_of_view_show_fov then
+        local fov = flags.ragebot_field_of_view or 180
+        local radius = (fov / 180) * (camera.ViewportSize.Y / 2)
+        rage_fov_circle.Position = mouse_pos
+        rage_fov_circle.Radius = radius
+        rage_fov_circle.Color = (flags.ragebot_field_of_view_color and flags.ragebot_field_of_view_color.Color) or c3(181, 255, 246)
+        rage_fov_circle.Visible = true
+    else
+        rage_fov_circle.Visible = false
+    end
+
+    if flags.ragebot and flags.ragebot_tracer and ragebot_target and ragebot_aim_position then
+        local screen_pos, on_screen = w2v(ragebot_aim_position)
+        if on_screen then
+            local origin_screen = mouse_pos
+            if flags.ragebot_tracer_origin == "character" and local_character and local_character:FindFirstChild("HumanoidRootPart") then
+                local ch_pos, ch_on = w2v(local_character.HumanoidRootPart.Position)
+                if ch_on then origin_screen = v2(ch_pos.X, ch_pos.Y) end
+            end
+            target_tracer.From = origin_screen
+            target_tracer.To = v2(screen_pos.X, screen_pos.Y)
+            target_tracer.Color = (flags.ragebot_tracer_color and flags.ragebot_tracer_color.Color) or c3(200, 30, 175)
+            target_tracer.Thickness = flags.ragebot_tracer_thickness or 2
+            target_tracer.Visible = true
+        else
+            target_tracer.Visible = false
+        end
+    else
+        target_tracer.Visible = false
+    end
+
+    if flags["3d_target_circle"] and ragebot_target and ragebot_target[4] and ragebot_target[4].HumanoidRootPart then
+        local cf = ragebot_target[4].HumanoidRootPart.CFrame * cfr(0, -2.8, 0)
+        local col = (flags["3d_target_circle_color"] and flags["3d_target_circle_color"].Color) or c3(255, 184, 243)
+        draw_3d_circle(cf, 3.5, col)
+    else
+        for _, l in pairs(circle_lines) do l.Visible = false end
+    end
+
+    if flags.crosshair_follow and ragebot_aim_position then
+        local pos, on_screen = w2v(ragebot_aim_position)
+        if on_screen then
+            local cx, cy = pos.X, pos.Y
+            local sz = 6
+            crosshair_lines[1].From = v2(cx - sz, cy)
+            crosshair_lines[1].To = v2(cx + sz, cy)
+            crosshair_lines[2].From = v2(cx, cy - sz)
+            crosshair_lines[2].To = v2(cx, cy + sz)
+            crosshair_lines[1].Visible = true
+            crosshair_lines[2].Visible = true
+        else
+            crosshair_lines[1].Visible = false
+            crosshair_lines[2].Visible = false
+        end
+    else
+        for _, l in pairs(crosshair_lines) do l.Visible = false end
+    end
+
+    if flags.view_target and ragebot_target and ragebot_target[4] and ragebot_target[4].HumanoidRootPart then
+        if not (flags.view_target_stop_when_knocked and ragebot_target[18]) then
+            camera.CameraSubject = ragebot_target[4].HumanoidRootPart
+        else
+            if local_parts.Humanoid then camera.CameraSubject = local_parts.Humanoid end
+        end
+    else
+        if local_parts.Humanoid and camera.CameraSubject ~= local_parts.Humanoid then
+            camera.CameraSubject = local_parts.Humanoid
+        end
+    end
+
+    if flags.face_target and ragebot_target and ragebot_target[4] and ragebot_target[4].HumanoidRootPart and local_character and local_character:FindFirstChild("HumanoidRootPart") then
+        local hrp = local_character.HumanoidRootPart
+        local tp = ragebot_target[4].HumanoidRootPart.Position
+        hrp.CFrame = cfr(hrp.Position, v3(tp.X, hrp.Position.Y, tp.Z))
+    end
+end
+
+local function get_esp(plr)
+    if not esp_cache[plr] then
+        local box_outline = Drawing.new("Square")
+        box_outline.Filled = false
+        box_outline.Thickness = 3
+        box_outline.Color = c3(0, 0, 0)
+        box_outline.Visible = false
+
+        local box = Drawing.new("Square")
+        box.Filled = false
+        box.Thickness = 1
+        box.Visible = false
+
+        local name_text = Drawing.new("Text")
+        name_text.Size = 13
+        name_text.Center = true
+        name_text.Outline = true
+        name_text.Visible = false
+
+        local hp_bar_bg = Drawing.new("Line")
+        hp_bar_bg.Thickness = 4
+        hp_bar_bg.Color = c3(0, 0, 0)
+        hp_bar_bg.Visible = false
+
+        local hp_bar = Drawing.new("Line")
+        hp_bar.Thickness = 2
+        hp_bar.Visible = false
+
+        local hp_text = Drawing.new("Text")
+        hp_text.Size = 11
+        hp_text.Center = false
+        hp_text.Outline = true
+        hp_text.Visible = false
+
+        local armor_bar_bg = Drawing.new("Line")
+        armor_bar_bg.Thickness = 4
+        armor_bar_bg.Color = c3(0, 0, 0)
+        armor_bar_bg.Visible = false
+
+        local armor_bar = Drawing.new("Line")
+        armor_bar.Thickness = 2
+        armor_bar.Visible = false
+
+        local tool_text = Drawing.new("Text")
+        tool_text.Size = 11
+        tool_text.Center = true
+        tool_text.Outline = true
+        tool_text.Visible = false
+
+        local highlight = Instance.new("Highlight")
+        highlight.Enabled = false
+
+        esp_cache[plr] = {
+            box_outline = box_outline,
+            box = box,
+            name = name_text,
+            hp_bar_bg = hp_bar_bg,
+            hp_bar = hp_bar,
+            hp_text = hp_text,
+            armor_bar_bg = armor_bar_bg,
+            armor_bar = armor_bar,
+            tool_text = tool_text,
+            highlight = highlight
+        }
+    end
+    return esp_cache[plr]
+end
+
+local function update_esp()
+    local is_esp_on = flags.esp
+    for plr, data in pairs(player_data) do
+        local esp = get_esp(plr)
+        local char = data[3]
+        if is_esp_on and char and not data[7] and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Head") then
+            local hrp = char.HumanoidRootPart
+            local head = char.Head
+            local hrp_pos, on_screen = w2v(hrp.Position)
+            local head_pos = w2v(head.Position + v3(0, 0.5, 0))
+            local leg_pos = w2v(hrp.Position - v3(0, 3, 0))
+
+            if on_screen then
+                local height = abs(head_pos.Y - leg_pos.Y)
+                local width = height * 0.65
+                local top_left = v2(hrp_pos.X - width / 2, head_pos.Y)
+
+                if flags.box then
+                    esp.box_outline.Position = top_left
+                    esp.box_outline.Size = v2(width, height)
+                    esp.box_outline.Visible = true
+
+                    esp.box.Position = top_left
+                    esp.box.Size = v2(width, height)
+                    esp.box.Color = (flags.box_color and flags.box_color.Color) or c3(255, 255, 255)
+                    esp.box.Visible = true
+                else
+                    esp.box_outline.Visible = false
+                    esp.box.Visible = false
+                end
+
+                if flags.name then
+                    esp.name.Position = v2(hrp_pos.X, top_left.Y - 15)
+                    esp.name.Text = flags.name_use_display and plr.DisplayName or plr.Name
+                    esp.name.Color = (flags.name_color and flags.name_color.Color) or c3(255, 255, 255)
+                    esp.name.Visible = true
+                else
+                    esp.name.Visible = false
+                end
+
+                if flags.health_bar then
+                    local hp = data[9] or 100
+                    local max_hp = data[10] or 100
+                    local bar_h = height * clamp(hp / max_hp, 0, 1)
+
+                    esp.hp_bar_bg.From = v2(top_left.X - 6, leg_pos.Y)
+                    esp.hp_bar_bg.To = v2(top_left.X - 6, top_left.Y)
+                    esp.hp_bar_bg.Visible = true
+
+                    esp.hp_bar.From = v2(top_left.X - 6, leg_pos.Y)
+                    esp.hp_bar.To = v2(top_left.X - 6, leg_pos.Y - bar_h)
+                    esp.hp_bar.Color = (flags.health_bar_color and flags.health_bar_color.Color) or c3(0, 255, 0)
+                    esp.hp_bar.Visible = true
+
+                    if flags.health_text then
+                        esp.hp_text.Position = v2(top_left.X - 25, leg_pos.Y - bar_h - 4)
+                        esp.hp_text.Text = tostring(floor(hp))
+                        esp.hp_text.Color = c3(255, 255, 255)
+                        esp.hp_text.Visible = true
+                    else
+                        esp.hp_text.Visible = false
+                    end
+                else
+                    esp.hp_bar_bg.Visible = false
+                    esp.hp_bar.Visible = false
+                    esp.hp_text.Visible = false
+                end
+
+                if flags.armor_bar then
+                    local arm = data[14] or 0
+                    local bar_h = height * clamp(arm / 150, 0, 1)
+
+                    esp.armor_bar_bg.From = v2(top_left.X - 11, leg_pos.Y)
+                    esp.armor_bar_bg.To = v2(top_left.X - 11, top_left.Y)
+                    esp.armor_bar_bg.Visible = true
+
+                    esp.armor_bar.From = v2(top_left.X - 11, leg_pos.Y)
+                    esp.armor_bar.To = v2(top_left.X - 11, leg_pos.Y - bar_h)
+                    esp.armor_bar.Color = (flags.armor_bar_color and flags.armor_bar_color.Color) or c3(0, 155, 255)
+                    esp.armor_bar.Visible = true
+                else
+                    esp.armor_bar_bg.Visible = false
+                    esp.armor_bar.Visible = false
+                end
+
+                if flags.tool_text then
+                    local tool_name = data[13] and data[13].Name or "None"
+                    esp.tool_text.Position = v2(hrp_pos.X, leg_pos.Y + 2)
+                    esp.tool_text.Text = tool_name
+                    esp.tool_text.Color = c3(255, 255, 255)
+                    esp.tool_text.Visible = true
+                else
+                    esp.tool_text.Visible = false
+                end
+
+                if flags.highlight then
+                    esp.highlight.Parent = char
+                    esp.highlight.FillColor = (flags.highlight_color and flags.highlight_color.Color) or c3(0, 0, 0)
+                    esp.highlight.OutlineColor = (flags.highlight_outline_color and flags.highlight_outline_color.Color) or c3(255, 255, 255)
+                    esp.highlight.DepthMode = flags.highlight_behind_walls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+                    esp.highlight.Enabled = true
+                else
+                    esp.highlight.Enabled = false
+                end
+            else
+                esp.box_outline.Visible = false
+                esp.box.Visible = false
+                esp.name.Visible = false
+                esp.hp_bar_bg.Visible = false
+                esp.hp_bar.Visible = false
+                esp.hp_text.Visible = false
+                esp.armor_bar_bg.Visible = false
+                esp.armor_bar.Visible = false
+                esp.tool_text.Visible = false
+                esp.highlight.Enabled = false
+            end
+        else
+            esp.box_outline.Visible = false
+            esp.box.Visible = false
+            esp.name.Visible = false
+            esp.hp_bar_bg.Visible = false
+            esp.hp_bar.Visible = false
+            esp.hp_text.Visible = false
+            esp.armor_bar_bg.Visible = false
+            esp.armor_bar.Visible = false
+            esp.tool_text.Visible = false
+            esp.highlight.Enabled = false
+        end
+    end
+end
+
+local cce = lighting:FindFirstChild("JujuColorCorrection") or Instance.new("ColorCorrectionEffect")
+cce.Name = "JujuColorCorrection"
+cce.Parent = lighting
+
+local blur = lighting:FindFirstChild("JujuBlur") or Instance.new("BlurEffect")
+blur.Name = "JujuBlur"
+blur.Parent = lighting
+
+local function update_world()
+    if flags.world_time then
+        lighting.ClockTime = flags.world_time_value or 4.5
+    end
+    if flags.saturation then
+        cce.Saturation = flags.saturation_value or 0
+    else
+        cce.Saturation = 0
+    end
+    if flags.contrast then
+        cce.Contrast = flags.contrast_value or 0
+    else
+        cce.Contrast = 0
+    end
+    if flags.motion_blur then
+        blur.Size = (flags.motion_blur_intensity or 25) / 5
+    else
+        blur.Size = 0
+    end
+    if flags.name_hide_nametags then
+        for _, plr in pairs(players:GetPlayers()) do
+            if plr.Character and plr.Character:FindFirstChild("Humanoid") then
+                plr.Character.Humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+            end
+        end
+    end
+end
+
+create_connection(run.Heartbeat, function(dt)
+    local_fps = 1 / dt
+    local hrp = local_character and local_character:FindFirstChild("HumanoidRootPart")
+    if hrp then local_client_position = hrp.CFrame end
+    for i = 1, #heartbeat_funcs do task.spawn(heartbeat_funcs[i], dt, hrp) end
+    for i = 1, #anti_aim do
+        local func = anti_aim[i]
+        if func then task.spawn(func, dt, hrp) end
+    end
+    if hrp then local_server_position = hrp.CFrame end
+end)
+
+create_connection(run.RenderStepped, function(dt)
+    do_noclip()
+    update_visualizations()
+    update_esp()
+    update_world()
+end)
+
+table.insert(heartbeat_funcs, do_ragebot)
+table.insert(heartbeat_funcs, do_follow_target)
+table.insert(heartbeat_funcs, do_void_hide)
+table.insert(heartbeat_funcs, do_velocity_desync)
+table.insert(heartbeat_funcs, do_speed)
+table.insert(heartbeat_funcs, do_flight)
+
+local function get_key(bind_data)
+    if not bind_data then return nil end
+    local expected_key = type(bind_data) == "table" and bind_data.key or bind_data
+    if type(expected_key) == "string" then
+        local success, result = pcall(function() return Enum.KeyCode[expected_key] end)
+        if success then return result end
+    end
+    return expected_key
+end
+
+create_connection(uis.InputBegan, function(input, gpe)
+    if gpe then return end
+    
+    local menu_key = get_key(flags.menu_toggle_bind) or Enum.KeyCode.RightShift
+    if input.KeyCode == menu_key or (menu_key == Enum.KeyCode.RightShift and input.KeyCode == Enum.KeyCode.Insert) then
+        if library and library.gui then
+            library.gui.Enabled = not library.gui.Enabled
+        end
+    end
+
+    local ragebot_key = get_key(flags.ragebot_bind)
+    if ragebot_key and input.KeyCode == ragebot_key then
+        flags.ragebot = not flags.ragebot
+        notify("ragebot: " .. (flags.ragebot and "enabled" or "disabled"), 1)
+    end
+
+    local target_key = get_key(flags.target_selection_target_bind)
+    if target_key and input.KeyCode == target_key then
+        if ragebot_target then 
+            set_ragebot_target(nil, "target cleared")
+        else
+            local best = get_ragebot_target_func()
+            set_ragebot_target(best, best and ("target set to " .. best[2].Name) or "no target found")
+        end
+    end
+end)
+
+task.spawn(function()
+    local leaderstats = lp:WaitForChild("leaderstats", 9e9)
+    local wanted = leaderstats:WaitForChild("Wanted", 9e9)
+    local last_wanted = wanted.Value
+    create_connection(wanted:GetPropertyChangedSignal("Value"), function()
+        local new_val = wanted.Value
+        if new_val - last_wanted == 50 then fire_signal("on_stomp") end
+        last_wanted = new_val
+    end)
+    local data_folder = lp:WaitForChild("DataFolder", 9e9)
+    local currency = data_folder:WaitForChild("Currency", 9e9)
+    local_cash = currency.Value
+    create_connection(currency:GetPropertyChangedSignal("Value"), function()
+        local new_cash = currency.Value
+        if new_cash < local_cash then local_bought_count += 1 end
+        local_cash = new_cash
+    end)
+end)
+
+local window = library:window({name = "zaaz star", size = udim2(0, 620, 0, 700)})
+
+local ragebot_tab = window:tab({name = "Ragebot"})
+local visuals_tab = window:tab({name = "Visuals"})
+local misc_tab = window:tab({name = "Misc"})
+
+local general_section = ragebot_tab:section({name = "general", side = "left"})
+local viz_section = ragebot_tab:section({name = "visualization", side = "left"})
+local anti_section = ragebot_tab:section({name = "anti", side = "right"})
+local utility_section = ragebot_tab:section({name = "utility", side = "right"})
+
+general_section:toggle({name = "ragebot", flag = "ragebot", default = false})
+general_section:keybind({name = "ragebot bind", flag = "ragebot_bind", key = Enum.KeyCode.V, mode = "toggle"})
+general_section:toggle({name = "auto fire", flag = "auto_fire", default = false})
+general_section:toggle({name = "at target vehicle", flag = "auto_fire_at_target_vehicle", default = true})
+general_section:toggle({name = "at backtrack", flag = "auto_fire_at_backtrack", default = false})
+general_section:toggle({name = "wall bang", flag = "auto_fire_wall_bang", default = false})
+general_section:toggle({name = "always fire", flag = "auto_fire_always_fire", default = true})
+general_section:toggle({name = "dont render", flag = "auto_fire_dont_render", default = false})
+general_section:toggle({name = "auto equip", flag = "auto_equip", default = false})
+general_section:dropdown({name = "unequip when", flag = "auto_equip_unequip_when", items = {"no target"}, default = {"no target"}, multi = true})
+general_section:dropdown({name = "gun", flag = "auto_equip_gun", items = {"double-barrel sg", "flintlock", "revolver", "rifle", "ak47", "p90", "lmg", "aug"}, default = {"rifle"}, multi = true})
+general_section:toggle({name = "spam resolver", flag = "auto_fire_defensive", default = false})
+general_section:slider({name = "normal position trust", flag = "void_spam_resolver_position_weight", min = 0.1, max = 5, default = 1.5, interval = 0.01})
+general_section:slider({name = "forget rate", flag = "void_spam_resolver_forget_rate", min = 0, max = 1000, default = 80, suffix = "%"})
+general_section:slider({name = "void trust", flag = "void_spam_resolver_void_weight", min = 0.1, max = 5, default = 0.2, interval = 0.01})
+general_section:slider({name = "accuracy", flag = "void_spam_resolver_accuracy", min = 5, max = 110, default = 76.82, suffix = "%", interval = 0.01})
+general_section:slider({name = "lerp when close", flag = "void_spam_resolver_lerp", min = 10, max = 100, default = 10, suffix = "%", interval = 0.1})
+general_section:dropdown({name = "target hitbox", flag = "ragebot_hitbox", items = {"head", "root"}, default = "head"})
+general_section:slider({name = "prediction", flag = "prediction", min = 0, max = 2000, default = 0, suffix = "%", interval = 0.01})
+general_section:slider({name = "resolver rate", flag = "resolver_rate", min = 0, max = 0.1, default = 0.037, suffix = "s", interval = 0.0001})
+general_section:slider({name = "shot delay", flag = "shot_delay", min = 0, max = 1000, default = 0, suffix = "ms"})
+general_section:slider({name = "field of view", flag = "ragebot_field_of_view", min = 5, max = 180, default = 180, suffix = "°"})
+general_section:slider({name = "fire cooldown", flag = "fire_cooldown", min = 0, max = 300, default = 5, suffix = "ms"})
+general_section:toggle({name = "target notifs", flag = "target_selection_notification", default = false})
+general_section:toggle({name = "automatic", flag = "target_selection_automatic", default = false})
+general_section:slider({name = "target cooldown", flag = "target_selection_cooldown", min = 0, max = 0.5, default = 0.03, suffix = "s", interval = 0.01})
+general_section:keybind({name = "target bind", flag = "target_selection_target_bind", key = Enum.KeyCode.E, mode = "toggle"})
+general_section:toggle({name = "target when shot at", flag = "target_selection_target_when_shot_at", default = false})
+general_section:toggle({name = "force target", flag = "target_selection_target_when_shot_at_force", default = false})
+general_section:dropdown({name = "untarget when", flag = "target_selection_untarget_when", items = {"better target", "invulnerable", "knocked", "flung", "dead"}, default = {"invulnerable", "dead"}, multi = true})
+general_section:dropdown({name = "target statuses", flag = "target_statuses", items = {"friendly", "neutral", "enemy"}, default = {"neutral"}, multi = true})
+general_section:dropdown({name = "prioritize by", flag = "prioritize_by", items = {"closest to character", "closest to mouse", "highest wanted", "lowest health", "random"}, default = "closest to mouse"})
+general_section:dropdown({name = "ignore if", flag = "ignore_if", items = {"invulnerable", "knocked", "in void"}, default = {"invulnerable"}, multi = true})
+general_section:slider({name = "target distance", flag = "target_selection_target_distance", min = 5, max = 250, default = 250, suffix = " studs"})
+
+viz_section:toggle({name = "crosshair follow", flag = "crosshair_follow", default = false})
+viz_section:toggle({name = "3d target circle", flag = "3d_target_circle", default = false})
+viz_section:colorpicker({name = "circle color", flag = "3d_target_circle_color", color = c3(255, 184, 243), alpha = 1})
+viz_section:colorpicker({name = "circle gradient", flag = "3d_target_circle_gradient_color", color = c3(255, 255, 255), alpha = 0})
+viz_section:toggle({name = "view target", flag = "view_target", default = false})
+viz_section:toggle({name = "stop when knocked", flag = "view_target_stop_when_knocked", default = false})
+viz_section:toggle({name = "face target", flag = "face_target", default = false})
+viz_section:toggle({name = "show fov", flag = "ragebot_field_of_view_show_fov", default = false})
+viz_section:toggle({name = "fov follow target", flag = "ragebot_field_of_view_follow_target", default = false})
+viz_section:colorpicker({name = "fov color", flag = "ragebot_field_of_view_color", color = c3(181, 255, 246), alpha = 0.2})
+viz_section:colorpicker({name = "fov outline", flag = "ragebot_field_of_view_outline_color", color = c3(15, 15, 15), alpha = 0.6})
+viz_section:colorpicker({name = "fov active", flag = "ragebot_field_of_view_active_color", color = c3(233, 44, 44), alpha = 0.2})
+viz_section:colorpicker({name = "fov active outline", flag = "ragebot_field_of_view_active_outline", color = c3(15, 15, 15), alpha = 0.2})
+viz_section:toggle({name = "tracer", flag = "ragebot_tracer", default = false})
+viz_section:slider({name = "tracer thickness", flag = "ragebot_tracer_thickness", min = 2, max = 8, default = 2, suffix = "px"})
+viz_section:colorpicker({name = "tracer color", flag = "ragebot_tracer_color", color = c3(200, 30, 175), alpha = 0.9})
+viz_section:colorpicker({name = "tracer outline", flag = "ragebot_tracer_outline_color", color = c3(15, 15, 15), alpha = 0.95})
+viz_section:dropdown({name = "tracer origin", flag = "ragebot_tracer_origin", items = {"character", "mouse", "gun"}, default = "mouse"})
+viz_section:dropdown({name = "tracer end", flag = "ragebot_tracer_end_point", items = {"predicted position", "character"}, default = "predicted position"})
+
+anti_section:toggle({name = "sender rate value", flag = "sender_rate_value", default = false})
+anti_section:dropdown({name = "rate type", flag = "sender_rate_value_type", items = {"automatic", "custom"}, default = "automatic"})
+anti_section:slider({name = "rate", flag = "sender_rate_value_rate", min = 0, max = 500, default = 15})
+anti_section:toggle({name = "network desync", flag = "network_desync", default = false})
+anti_section:toggle({name = "velocity desync", flag = "velocity_desync", default = false})
+anti_section:toggle({name = "desync rotate", flag = "velocity_desync_rotate", default = false})
+anti_section:dropdown({name = "desync type", flag = "velocity_desync_type", items = {"high", "low", "zero", "limit", "high y"}, default = "high"})
+anti_section:dropdown({name = "desync disable when", flag = "velocity_desync_disable_when", items = {"above x health", "auto stomping"}, default = {}, multi = true})
+anti_section:slider({name = "desync health", flag = "velocity_desync_health", min = 10, max = 100, default = 0, suffix = "%"})
+anti_section:toggle({name = "fake position", flag = "fake_position", default = false})
+anti_section:toggle({name = "fake pos indicator", flag = "fake_position_indicator", default = false})
+anti_section:toggle({name = "fake pos smooth", flag = "smooth_fake_position_indicator", default = false})
+anti_section:colorpicker({name = "fake pos icon", flag = "fake_position_indicator_icon_color", color = c3(181, 255, 246), alpha = 0.45})
+anti_section:colorpicker({name = "fake pos glow", flag = "fake_position_indicator_glow_color", color = c3(0, 0, 0), alpha = 0.08})
+anti_section:colorpicker({name = "fake pos bg", flag = "fake_position_indicator_background_color", color = c3(0, 0, 0), alpha = 0.15})
+anti_section:toggle({name = "fake pos notifs", flag = "fake_position_notifications", default = false})
+anti_section:toggle({name = "fake pos safe mode", flag = "fake_position_safe_mode", default = false})
+anti_section:slider({name = "refresh every", flag = "refresh_every", min = 5, max = 240, default = 240, suffix = "s"})
+anti_section:slider({name = "freeze time", flag = "fake_position_freeze_time", min = 0.05, max = 0.5, default = 0.2, interval = 0.01, suffix = "s"})
+anti_section:slider({name = "sleep rate", flag = "sleep_rate", min = 1, max = 100, default = 1, suffix = "%"})
+anti_section:toggle({name = "void hide", flag = "void_hide", default = false})
+anti_section:dropdown({name = "void type", flag = "void_hide_type", items = {"random", "bait", "vc server"}, default = "random"})
+anti_section:slider({name = "bait distance", flag = "void_hide_bait_distance", min = 200, max = 2500, default = 250, suffix = " studs"})
+anti_section:slider({name = "bait cooldown", flag = "void_hide_bait_cooldown", min = 0.01, max = 1.5, default = 0.5, interval = 0.01, suffix = "s"})
+anti_section:slider({name = "bait time", flag = "void_hide_bait_time", min = 0.01, max = 0.3, default = 0.03, interval = 0.01, suffix = "s"})
+anti_section:dropdown({name = "void disable when", flag = "void_hide_disable_when", items = {"target selected", "following target", "target knocked", "purchasing"}, default = {}, multi = true})
+anti_section:dropdown({name = "void force when", flag = "void_hide_force_when", items = {"not full health", "tabbed out", "reloading"}, default = {}, multi = true})
+anti_section:toggle({name = "void spam", flag = "void_hide_exploit", default = false})
+anti_section:toggle({name = "void stop if forced", flag = "void_hide_stop_if_forced", default = false})
+anti_section:slider({name = "void offset", flag = "void_hide_offset", min = 0, max = 250, default = 0, suffix = "studs"})
+anti_section:slider({name = "void time", flag = "void_hide_void_time", min = 0.01, max = 2, default = 0.47, interval = 0.001, suffix = "s"})
+anti_section:slider({name = "void tp time", flag = "void_hide_teleport_time", min = 0.01, max = 2, default = 0.1, interval = 0.001, suffix = "s"})
+
+utility_section:toggle({name = "safe purchasing", flag = "safe_purchasing", default = false})
+utility_section:dropdown({name = "avoid statuses", flag = "safe_purchasing_avoid_statuses", items = {"friendly", "target", "neutral", "enemy"}, default = {"target", "enemy"}, multi = true})
+utility_section:toggle({name = "auto loadout", flag = "auto_loadout", default = false})
+utility_section:dropdown({name = "loadout disable when", flag = "auto_loadout_disable_when", items = {"below x health", "forcefield"}, default = {"forcefield"}, multi = true})
+utility_section:dropdown({name = "loadout guns", flag = "auto_loadout_guns", items = {"double-barrel sg", "tacticalshotgun", "flintlock", "revolver", "rifle", "knife", "ak47", "aug", "lmg"}, default = {"rifle"}, multi = true})
+utility_section:slider({name = "loadout ammo", flag = "auto_loadout_ammo", min = 0, max = 50, default = 5, suffix = "x"})
+utility_section:toggle({name = "follow target", flag = "follow_target", default = false})
+utility_section:dropdown({name = "follow style", flag = "follow_target_dropdown", items = {"random", "random spam", "strafe"}, default = "random"})
+utility_section:dropdown({name = "follow stop if", flag = "follow_target_stop_if", items = {"no gun equipped", "target knocked", "reloading"}, default = {"no gun equipped", "target knocked", "reloading"}, multi = true})
+utility_section:slider({name = "follow distance", flag = "follow_target_distance", min = 2, max = 200, default = 15, suffix = " studs"})
+utility_section:slider({name = "follow height", flag = "follow_target_height", min = -200, max = 200, default = 0, suffix = " studs"})
+utility_section:slider({name = "follow speed", flag = "follow_target_speed", min = 1, max = 100, default = 75, suffix = "%"})
+utility_section:toggle({name = "auto stomp", flag = "auto_stomp", default = false})
+utility_section:toggle({name = "stomp stop when dead", flag = "auto_stomp_stop_when_dead", default = true})
+utility_section:dropdown({name = "stomp statuses", flag = "auto_stomp_target_statuses", items = {"friendly", "neutral", "target", "enemy"}, default = {"target"}, multi = true})
+utility_section:toggle({name = "auto ammo", flag = "auto_ammo", default = false})
+utility_section:dropdown({name = "ammo disable when", flag = "auto_ammo_disable_when", items = {"target alive"}, default = {}, multi = true})
+utility_section:slider({name = "min clips", flag = "auto_ammo_minimum_clips", min = 0, max = 50, default = 1, suffix = "x"})
+utility_section:slider({name = "ammo purchase amt", flag = "auto_ammo_purchase_amount", min = 0, max = 50, default = 10, suffix = "x"})
+utility_section:toggle({name = "auto armor", flag = "auto_armor", default = false})
+utility_section:slider({name = "armor threshold", flag = "auto_armor_purchase_if_below", min = 0, max = 100, default = 40, suffix = "%"})
+utility_section:slider({name = "armor cooldown", flag = "auto_armor_try_cooldown", min = 0, max = 2, default = 0.05, interval = 0.01, suffix = "s"})
+utility_section:toggle({name = "anti stomp", flag = "anti_stomp", default = false})
+utility_section:toggle({name = "anti stomp tp back", flag = "anti_stomp_teleport_back", default = false})
+utility_section:toggle({name = "auto mask", flag = "auto_mask", default = false})
+utility_section:dropdown({name = "mask disable when", flag = "auto_mask_disable_when", items = {"not full health", "target alive"}, default = {}, multi = true})
+utility_section:toggle({name = "auto heal", flag = "auto_heal", default = false})
+utility_section:slider({name = "heal threshold", flag = "auto_heal_purchase_if_below", min = 0, max = 100, default = 70, suffix = "%"})
+utility_section:slider({name = "heal cooldown", flag = "auto_heal_try_cooldown", min = 0, max = 2, default = 0.05, interval = 0.01, suffix = "s"})
+utility_section:toggle({name = "anti taser", flag = "anti_taser", default = false})
+utility_section:toggle({name = "rapid fire", flag = "rapid_fire", default = false})
+
+local movement_section = misc_tab:section({name = "movement", side = "left"})
+local other_section = misc_tab:section({name = "other", side = "left"})
+local server_section = misc_tab:section({name = "server", side = "right"})
+server_section:keybind({name = "menu toggle", flag = "menu_toggle_bind", key = Enum.KeyCode.RightShift, mode = "toggle"})
+
+movement_section:toggle({name = "remove jump cooldown", flag = "remove_jump_cooldown", default = false})
+movement_section:toggle({name = "remove slowdowns", flag = "remove_slowdowns", default = false})
+movement_section:toggle({name = "jump power", flag = "jump_power", default = false})
+movement_section:slider({name = "jump power val", flag = "jump_power_value", min = 0, max = 1000, default = 50})
+movement_section:toggle({name = "anti trip", flag = "anti_trip", default = false})
+movement_section:toggle({name = "anti sit", flag = "anti_sit", default = false})
+movement_section:toggle({name = "noclip", flag = "noclip", default = false})
+movement_section:toggle({name = "speed", flag = "speed", default = false})
+movement_section:slider({name = "speed value", flag = "speed_value", min = 0, max = 100, default = 35, suffix = "%"})
+movement_section:dropdown({name = "speed style", flag = "speed_style", items = {"minecraft", "slippery", "normal", "bhop"}, default = {"normal"}})
+movement_section:toggle({name = "flight", flag = "flight", default = false})
+movement_section:slider({name = "flight speed", flag = "flight_value", min = 1, max = 100, default = 35, suffix = "%"})
+
+other_section:toggle({name = "animation breaker", flag = "animation_breaker", default = false})
+other_section:slider({name = "anim lag", flag = "animation_breaker_lag_amount", min = 0, max = 100, default = 0, suffix = "%"})
+other_section:slider({name = "anim jitter", flag = "animation_breaker_jitter_amount", min = 0, max = 100, default = 0, suffix = "%"})
+other_section:toggle({name = "spinbot", flag = "spinbot", default = false})
+other_section:slider({name = "spinbot speed", flag = "spinbot_speed", min = 1, max = 100, default = 50, suffix = "%"})
+other_section:toggle({name = "remove flashbang", flag = "remove_flashbang", default = false})
+other_section:toggle({name = "remove recoil", flag = "remove_recoil", default = false})
+other_section:toggle({name = "automatic guns", flag = "automatic_guns", default = false})
+
+server_section:button({name = "copy join script", callback = function()
+    setclipboard('cloneref(game:GetService("TeleportService")):TeleportToPlaceInstance(' .. game.PlaceId .. ', "' .. game.JobId .. '")')
+    notify("copied join script", 1)
+end})
+server_section:button({name = "rejoin server", callback = function()
+    teleport_s:TeleportToPlaceInstance(game.PlaceId, game.JobId)
+end})
+server_section:button({name = "hop servers", callback = function()
+    local servers = http:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")).data
+    local lowest_ping = 9e9
+    local most_players = 0
+    local best_server
+    for i = 1, #servers do
+        local s = servers[i]
+        local p = tonumber(s.playing)
+        local ping = tonumber(s.ping)
+        if p > most_players and ping < lowest_ping then
+            lowest_ping = ping
+            most_players = p
+            best_server = s.id
+        end
+    end
+    if best_server then
+        lp:Kick("H..")
+        teleport_s:TeleportToPlaceInstance(game.PlaceId, best_server)
+    else
+        notify("no server found", 3)
+    end
+end})
+server_section:button({name = "force reset", callback = function()
+    local hum = local_parts.Humanoid
+    if hum then hum.Health = 0 end
+end})
+server_section:button({name = "redeem codes", callback = function()
+    local html = game:HttpGet("https://gamerant.com/roblox-da-hood-codes/")
+    html = html:sub(html:find("All Active Da Hood Codes"), html:find("All Expired Da Hood Codes") - 1)
+    local codes = {}
+    for code in html:gmatch("**(.-)**") do
+        if not code:find("%(") then table.insert(codes, code:gsub("%s+$", "")) end
+    end
+    for i = 1, #codes do
+        event:FireServer("EnterPromoCode", codes[i])
+        task.wait(6)
+    end
+end})
+
+local esp_section = visuals_tab:section({name = "player esp", side = "left"})
+local world_section = visuals_tab:section({name = "world", side = "right"})
+
+esp_section:toggle({name = "esp enabled", flag = "esp", default = false})
+esp_section:toggle({name = "box", flag = "box", default = false})
+esp_section:colorpicker({name = "box color", flag = "box_color", color = c3(255, 255, 255), alpha = 1})
+esp_section:colorpicker({name = "box outline", flag = "box_outline_color", color = c3(30, 30, 30), alpha = 1})
+esp_section:toggle({name = "name", flag = "name", default = false})
+esp_section:toggle({name = "use display name", flag = "name_use_display", default = false})
+esp_section:colorpicker({name = "name color", flag = "name_color", color = c3(255, 255, 255), alpha = 1})
+esp_section:toggle({name = "health bar", flag = "health_bar", default = false})
+esp_section:colorpicker({name = "health color", flag = "health_bar_color", color = c3(0, 255, 0), alpha = 1})
+esp_section:toggle({name = "health text", flag = "health_text", default = false})
+esp_section:toggle({name = "armor bar", flag = "armor_bar", default = false})
+esp_section:colorpicker({name = "armor color", flag = "armor_bar_color", color = c3(0, 155, 255), alpha = 1})
+esp_section:toggle({name = "tool text", flag = "tool_text", default = false})
+esp_section:toggle({name = "chams", flag = "chams", default = false})
+esp_section:toggle({name = "chams behind walls", flag = "chams_behind_walls", default = true})
+esp_section:colorpicker({name = "chams color", flag = "chams_color", color = c3(249, 217, 255), alpha = 0.5})
+esp_section:toggle({name = "highlight", flag = "highlight", default = false})
+esp_section:toggle({name = "highlight walls", flag = "highlight_behind_walls", default = true})
+esp_section:colorpicker({name = "highlight color", flag = "highlight_color", color = c3(0, 0, 0), alpha = 0.1})
+esp_section:colorpicker({name = "highlight outline", flag = "highlight_outline_color", color = c3(255, 255, 255), alpha = 0.2})
+
+world_section:toggle({name = "world time", flag = "world_time", default = false})
+world_section:slider({name = "time value", flag = "world_time_value", min = 0, max = 24, default = 4.5, interval = 0.1})
+world_section:toggle({name = "saturation", flag = "saturation", default = false})
+world_section:slider({name = "sat value", flag = "saturation_value", min = -1, max = 1, default = 0, interval = 0.01})
+world_section:toggle({name = "contrast", flag = "contrast", default = false})
+world_section:slider({name = "contrast value", flag = "contrast_value", min = -1, max = 1, default = 0, interval = 0.01})
+world_section:toggle({name = "motion blur", flag = "motion_blur", default = false})
+world_section:slider({name = "blur intensity", flag = "motion_blur_intensity", min = 0, max = 100, default = 25, suffix = "%"})
+world_section:toggle({name = "hide nametags", flag = "name_hide_nametags", default = false})
+
+local shop_section = misc_tab:section({name = "shop", side = "right"})
+
+shop_section:dropdown({
+    name = "select gun", 
+    flag = "selected_shop_gun", 
+    items = {"double-barrel sg", "revolver", "rifle", "shotgun", "tacticalshotgun", "flintlock", "ak47", "p90", "lmg", "aug"}, 
+    default = "revolver"
+})
+
+shop_section:button({name = "buy gun", callback = function()
+    local item = type(flags.selected_shop_gun) == "table" and flags.selected_shop_gun[1] or flags.selected_shop_gun or "revolver"
+    buy_item(item, 1)
+end})
+
+shop_section:slider({name = "ammo amount", flag = "shop_ammo_amount", min = 1, max = 50, default = 5, suffix = "x"})
+
+shop_section:button({name = "buy ammo for gun", callback = function()
+    local item = type(flags.selected_shop_gun) == "table" and flags.selected_shop_gun[1] or flags.selected_shop_gun or "revolver"
+    local amt = flags.shop_ammo_amount or 5
+    buy_item(item .. " ammo", amt)
+end})
+
+shop_section:dropdown({
+    name = "select utility", 
+    flag = "selected_shop_utility",
+    items = {"medium armor", "high-medium armor", "popcorn", "pizza", "chicken", "ninja mask"},
+    default = "high-medium armor"
+})
+
+shop_section:button({name = "buy utility", callback = function()
+    local item = type(flags.selected_shop_utility) == "table" and flags.selected_shop_utility[1] or flags.selected_shop_utility or "high-medium armor"
+    buy_item(item, 1)
+end})
+
+notify("zaz star has loaded", 1)
